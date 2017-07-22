@@ -37,6 +37,8 @@ static void my_gballoc_free(void* s)
 #endif
 #include "testrunnerswitcher.h"
 #include "umock_c.h"
+#include "umocktypes_charptr.h"
+
 
 #include "azure_c_shared_utility/x509_schannel.h"
 #include "umocktypes_charptr.h"
@@ -110,16 +112,26 @@ MOCKABLE_FUNCTION(WINAPI, BOOL, CryptImportKey,
     HCRYPTKEY   *, phKey
 );
 
+#if _MSC_VER > 1500
+MOCKABLE_FUNCTION(WINAPI, SECURITY_STATUS, NCryptFreeObject, NCRYPT_HANDLE, hObject);
+MOCKABLE_FUNCTION(WINAPI, SECURITY_STATUS, NCryptOpenStorageProvider, NCRYPT_PROV_HANDLE*, phProvider, LPCWSTR, pszProviderName, DWORD, dwFlags);
+MOCKABLE_FUNCTION(WINAPI, SECURITY_STATUS, NCryptImportKey, NCRYPT_PROV_HANDLE, hProvider, NCRYPT_KEY_HANDLE, hImportKey, LPCWSTR, pszBlobType, NCryptBufferDesc*, pParameterList, NCRYPT_KEY_HANDLE*, phKey, PBYTE, pbData, DWORD, cbData, DWORD, dwFlags);
+#endif
 
 #undef ENABLE_MOCKS
 
 static TEST_MUTEX_HANDLE g_testByTest;
 static TEST_MUTEX_HANDLE g_dllByDll;
 
+static const unsigned char TEST_DATA_INFO[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10 };
+#define TEST_KEY_SIZE       10
+
+//PCERT_INFO* g_cert_info;
+
 static void on_umock_c_error(UMOCK_C_ERROR_CODE error_code)
 {
-(void)error_code;
-ASSERT_FAIL("umock_c reported error");
+    (void)error_code;
+    ASSERT_FAIL("umock_c reported error");
 }
 
 static BOOL my_CryptStringToBinaryA(
@@ -163,11 +175,37 @@ static BOOL my_CryptDecodeObjectEx(
     (void)pvStructInfo;
     (void)lpszStructType;
     (void)dwCertEncodingType;
-    if (pcbStructInfo != NULL)
+#if _MSC_VER > 1500
+    if (lpszStructType == X509_ECC_PRIVATE_KEY)
     {
-        *pcbStructInfo = 2; /*assume the decoded size is 2*/
-    }
+        if (pcbStructInfo != NULL)
+        {
+            *pcbStructInfo = sizeof(CRYPT_ECC_PRIVATE_KEY_INFO); /*assume the decoded size is 2*/
+        }
+        if (pvStructInfo != NULL)
+        {
+            PCRYPT_ECC_PRIVATE_KEY_INFO key_info = (PCRYPT_ECC_PRIVATE_KEY_INFO)pvStructInfo;
+            key_info->dwVersion = 12;
+            key_info->PrivateKey.cbData = TEST_KEY_SIZE;
+            key_info->PrivateKey.pbData = (BYTE*)TEST_DATA_INFO;
 
+            key_info->PublicKey.cbData = TEST_KEY_SIZE;
+            key_info->PublicKey.pbData = (BYTE*)TEST_DATA_INFO;
+        }
+    }
+    else
+    {
+        if (pcbStructInfo != NULL)
+        {
+            *pcbStructInfo = 2; /*assume the decoded size is 2*/
+        }
+    }
+#else
+        if (pcbStructInfo != NULL)
+        {
+            *pcbStructInfo = 2; /*assume the decoded size is 2*/
+        }
+#endif
     return TRUE;
 }
 
@@ -211,10 +249,16 @@ static PCCERT_CONTEXT  my_CertCreateCertificateContext(
     DWORD cbCertEncoded
 )
 {
+    PCERT_CONTEXT result;
     (void)dwCertEncodingType;
     (void)pbCertEncoded;
     (void)cbCertEncoded;
-    return (PCCERT_CONTEXT)my_gballoc_malloc(5);
+    result = (PCERT_CONTEXT)my_gballoc_malloc(sizeof(CERT_CONTEXT));
+    result->pCertInfo = (PCERT_INFO)my_gballoc_malloc(sizeof(CERT_INFO));
+    result->pCertInfo->SubjectPublicKeyInfo.PublicKey.cbData = TEST_KEY_SIZE;
+    result->pCertInfo->SubjectPublicKeyInfo.PublicKey.pbData = (BYTE*)TEST_DATA_INFO;
+
+    return result;
 }
 
 static BOOL my_CryptReleaseContext(
@@ -226,6 +270,14 @@ static BOOL my_CryptReleaseContext(
     my_gballoc_free((void*)hProv);
     return TRUE;
 }
+
+#if _MSC_VER > 1500
+static SECURITY_STATUS my_NCryptFreeObject(_In_ NCRYPT_HANDLE hObject)
+{
+    my_gballoc_free((void*)hObject);
+    return ERROR_SUCCESS;
+}
+#endif
 
 static BOOL my_CryptDestroyKey(
     HCRYPTKEY hKey
@@ -239,6 +291,7 @@ static BOOL my_CertFreeCertificateContext(
     PCCERT_CONTEXT pCertContext
 )
 {
+    my_gballoc_free(pCertContext->pCertInfo);
     my_gballoc_free((void*)pCertContext);
     return TRUE;
 }
@@ -247,7 +300,7 @@ static BOOL my_CertSetCertificateContextProperty(
     PCCERT_CONTEXT pCertContext,
     DWORD dwPropId,
     DWORD dwFlags,
-    const void           * pvData
+    const void* pvData
 )
 {
     (void)pCertContext;
@@ -273,15 +326,24 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
         REGISTER_GLOBAL_MOCK_FAIL_RETURN(gballoc_malloc, NULL);
         REGISTER_GLOBAL_MOCK_HOOK(gballoc_free, my_gballoc_free);
 
+        //REGISTER_TYPE(wchar_t*, IOTHUB_SECURITY_TYPE);
+
         REGISTER_UMOCK_ALIAS_TYPE(LPCTSTR, const char*);
         REGISTER_UMOCK_ALIAS_TYPE(LPCSTR, void*);
         REGISTER_UMOCK_ALIAS_TYPE(PCRYPT_DECODE_PARA, void*);
         REGISTER_UMOCK_ALIAS_TYPE(HCRYPTPROV, void*);
         REGISTER_UMOCK_ALIAS_TYPE(HCRYPTKEY, void*);
         REGISTER_UMOCK_ALIAS_TYPE(PCCERT_CONTEXT, void*);
-        
+        REGISTER_UMOCK_ALIAS_TYPE(NCRYPT_HANDLE, void*);
+        REGISTER_UMOCK_ALIAS_TYPE(NCRYPT_PROV_HANDLE, void*);
+
+        REGISTER_UMOCK_ALIAS_TYPE(PBYTE, void*);
         REGISTER_UMOCK_ALIAS_TYPE(DWORD, unsigned int);
-        
+        REGISTER_UMOCK_ALIAS_TYPE(SECURITY_STATUS, unsigned int);
+        REGISTER_UMOCK_ALIAS_TYPE(BOOL, unsigned int);
+        REGISTER_UMOCK_ALIAS_TYPE(LPCWSTR, void*);
+        REGISTER_UMOCK_ALIAS_TYPE(NCRYPT_KEY_HANDLE, void*);
+
         REGISTER_GLOBAL_MOCK_HOOK(CryptStringToBinaryA, my_CryptStringToBinaryA);
         REGISTER_GLOBAL_MOCK_FAIL_RETURN(CryptStringToBinaryA, FALSE);
 
@@ -307,6 +369,16 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
 
         REGISTER_GLOBAL_MOCK_HOOK(CertFreeCertificateContext, my_CertFreeCertificateContext);
 
+#if _MSC_VER > 1500
+        REGISTER_GLOBAL_MOCK_RETURN(NCryptOpenStorageProvider, ERROR_SUCCESS);
+        REGISTER_GLOBAL_MOCK_FAIL_RETURN(NCryptOpenStorageProvider, ERROR_INVALID_FUNCTION);
+
+        REGISTER_GLOBAL_MOCK_RETURN(NCryptImportKey, ERROR_SUCCESS);
+        REGISTER_GLOBAL_MOCK_FAIL_RETURN(NCryptImportKey, ERROR_INVALID_FUNCTION);
+
+        REGISTER_GLOBAL_MOCK_HOOK(NCryptFreeObject, my_NCryptFreeObject);
+        REGISTER_GLOBAL_MOCK_FAIL_RETURN(NCryptFreeObject, ERROR_INVALID_FUNCTION);
+#endif
     }
 
     TEST_SUITE_CLEANUP(TestClassCleanup)
@@ -325,6 +397,63 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
     TEST_FUNCTION_CLEANUP(cleans)
     {
 
+    }
+
+#if _MSC_VER > 1500
+    static void setup_x509_schannel_create_ecc_mocks(void)
+    {
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the handle storage space*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "how big is the certificate binary size?"*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the binary storage for the certificate*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "fill in the certificate in this binary buffer"*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "how big is the private key binary size?"*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the binary storage for the private key*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "fill in the private key in this binary buffer"*/
+        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, NULL, IGNORED_PTR_ARG)).SetReturn(FALSE); /*this is asking "how big is the decoded private key? (from binary)*/
+        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, X509_ECC_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, NULL, IGNORED_PTR_ARG)); /*this is asking "how big is the decoded private key? (from binary)*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is allocating space for the decoded private key*/
+        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, X509_ECC_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, IGNORED_PTR_ARG, IGNORED_PTR_ARG)); /*this is asking "how big is the decoded private key? (from binary)*/
+        STRICT_EXPECTED_CALL(CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, IGNORED_PTR_ARG, IGNORED_NUM_ARG)); /*create a certificate context from an encoded certificate*/
+
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG));
+        STRICT_EXPECTED_CALL(NCryptOpenStorageProvider(IGNORED_PTR_ARG, MS_KEY_STORAGE_PROVIDER, 0))
+            .IgnoreArgument_pszProviderName();
+        STRICT_EXPECTED_CALL(NCryptImportKey((NCRYPT_PROV_HANDLE)IGNORED_PTR_ARG, (NCRYPT_KEY_HANDLE)IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_NUM_ARG, NCRYPT_OVERWRITE_KEY_FLAG))
+            .IgnoreArgument_hProvider()
+            .IgnoreArgument_hImportKey();
+        STRICT_EXPECTED_CALL(NCryptFreeObject((HCRYPTKEY)IGNORED_PTR_ARG))
+            .IgnoreArgument_hObject();
+        STRICT_EXPECTED_CALL(NCryptFreeObject((HCRYPTKEY)IGNORED_PTR_ARG))
+            .IgnoreArgument_hObject();
+
+        STRICT_EXPECTED_CALL(CertSetCertificateContextProperty(IGNORED_PTR_ARG, CERT_KEY_PROV_INFO_PROP_ID, 0, IGNORED_PTR_ARG)); /*give the private key*/
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+    }
+#endif
+
+    static void setup_x509_schannel_create_mocks(void)
+    {
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the handle storage space*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "how big is the certificate binary size?"*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the binary storage for the certificate*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "fill in the certificate in this binary buffer"*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "how big is the private key binary size?"*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is creating the binary storage for the private key*/
+        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)); /*this is asking for "fill in the private key in this binary buffer"*/
+        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, NULL, IGNORED_PTR_ARG)); /*this is asking "how big is the decoded private key? (from binary)*/
+        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)); /*this is allocating space for the decoded private key*/
+        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, IGNORED_PTR_ARG, IGNORED_PTR_ARG)); /*this is asking "how big is the decoded private key? (from binary)*/
+        STRICT_EXPECTED_CALL(CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, IGNORED_PTR_ARG, IGNORED_NUM_ARG)); /*create a certificate context from an encoded certificate*/
+        STRICT_EXPECTED_CALL(CryptAcquireContextA(IGNORED_PTR_ARG, NULL, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)); /*this is acquire a handle to a key container within a cryptographic service provider*/
+        STRICT_EXPECTED_CALL(CryptImportKey((HCRYPTPROV)IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_NUM_ARG, (HCRYPTKEY)NULL, 0, IGNORED_PTR_ARG)) /*tranferring the key from the blob to the cryptrographic key provider*/
+            .IgnoreArgument_hProv();
+        STRICT_EXPECTED_CALL(CertSetCertificateContextProperty(IGNORED_PTR_ARG, CERT_KEY_PROV_HANDLE_PROP_ID, 0, IGNORED_PTR_ARG)); /*give the private key*/
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
+        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG));
     }
 
     /*Tests_SRS_X509_SCHANNEL_02_001: [ If x509certificate or x509privatekey are NULL then x509_schannel_create shall fail and return NULL. ]*/
@@ -366,63 +495,9 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
     TEST_FUNCTION(x509_schannel_create_succeeds)
     {
         ///arrange
-		X509_SCHANNEL_HANDLE h;
+        X509_SCHANNEL_HANDLE h;
 
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the handle storage space*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "how big is the certificate binary size?"*/
-            .IgnoreArgument_pcbBinary();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the binary storage for the certificate*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "fill in the certificate in this binary buffer"*/
-            .IgnoreArgument_pcbBinary() 
-            .IgnoreArgument_pbBinary();
-
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "how big is the private key binary size?"*/
-            .IgnoreArgument_pcbBinary();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the binary storage for the private key*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "fill in the private key in this binary buffer"*/
-            .IgnoreArgument_pcbBinary()
-            .IgnoreArgument_pbBinary();
-
-        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, NULL, IGNORED_PTR_ARG)) /*this is asking "how big is the decoded private key? (from binary)*/
-            .IgnoreArgument_pbEncoded()
-            .IgnoreArgument_cbEncoded()
-            .IgnoreArgument_pcbStructInfo();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is allocating space for the decoded private key*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, IGNORED_PTR_ARG, IGNORED_PTR_ARG)) /*this is asking "how big is the decoded private key? (from binary)*/
-            .IgnoreArgument_pbEncoded()
-            .IgnoreArgument_cbEncoded()
-            .IgnoreArgument_pvStructInfo()
-            .IgnoreArgument_pcbStructInfo();
-
-        STRICT_EXPECTED_CALL(CryptAcquireContextA(IGNORED_PTR_ARG, NULL, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) /*this is acquire a handle to a key container within a cryptographic service provider*/
-            .IgnoreArgument_phProv();
-
-        STRICT_EXPECTED_CALL(CryptImportKey((HCRYPTPROV)IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_NUM_ARG, (HCRYPTKEY)NULL, 0, IGNORED_PTR_ARG)) /*tranferring the key from the blob to the cryptrographic key provider*/
-            .IgnoreArgument_hProv()
-            .IgnoreArgument_pbData()
-            .IgnoreArgument_dwDataLen()
-            .IgnoreArgument_phKey();
-
-        STRICT_EXPECTED_CALL(CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, IGNORED_PTR_ARG, IGNORED_NUM_ARG)) /*create a certificate context from an encoded certificate*/
-            .IgnoreArgument_cbCertEncoded()
-            .IgnoreArgument_pbCertEncoded();
-
-        STRICT_EXPECTED_CALL(CertSetCertificateContextProperty(IGNORED_PTR_ARG, CERT_KEY_PROV_HANDLE_PROP_ID, 0, IGNORED_PTR_ARG)) /*give the private key*/
-            .IgnoreArgument_pCertContext()
-            .IgnoreArgument_pvData();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
+        setup_x509_schannel_create_mocks();
 
         ///act
         h = x509_schannel_create("certificate", "private key");
@@ -439,72 +514,18 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
     TEST_FUNCTION(x509_schannel_negative_test_cases)
     {
         ///arrange
-		size_t i;
-        int negativeTestsInitResult = umock_c_negative_tests_init();
+        size_t i;
         size_t calls_that_cannot_fail[] = {
+            7,
             14, /*gballoc_free*/
             15, /*gballoc_free*/
             16, /*gballoc_free*/
             
         };
+        int negativeTestsInitResult = umock_c_negative_tests_init();
+        ASSERT_ARE_EQUAL(int, 0, negativeTestsInitResult);
 
-		ASSERT_ARE_EQUAL(int, 0, negativeTestsInitResult);
-
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the handle storage space*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "how big is the certificate binary size?"*/
-            .IgnoreArgument_pcbBinary();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the binary storage for the certificate*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("certificate", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "fill in the certificate in this binary buffer"*/
-            .IgnoreArgument_pcbBinary()
-            .IgnoreArgument_pbBinary();
-
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, NULL, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "how big is the private key binary size?"*/
-            .IgnoreArgument_pcbBinary();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is creating the binary storage for the private key*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptStringToBinaryA("private key", 0, CRYPT_STRING_ANY, IGNORED_PTR_ARG, IGNORED_PTR_ARG, NULL, NULL)) /*this is asking for "fill in the private key in this binary buffer"*/
-            .IgnoreArgument_pcbBinary()
-            .IgnoreArgument_pbBinary();
-
-        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, NULL, IGNORED_PTR_ARG)) /*this is asking "how big is the decoded private key? (from binary)*/
-            .IgnoreArgument_pbEncoded()
-            .IgnoreArgument_cbEncoded()
-            .IgnoreArgument_pcbStructInfo();
-        STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG)) /*this is allocating space for the decoded private key*/
-            .IgnoreArgument_size();
-        STRICT_EXPECTED_CALL(CryptDecodeObjectEx(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, PKCS_RSA_PRIVATE_KEY, IGNORED_PTR_ARG, IGNORED_NUM_ARG, 0, NULL, IGNORED_PTR_ARG, IGNORED_PTR_ARG)) /*this is asking "how big is the decoded private key? (from binary)*/
-            .IgnoreArgument_pbEncoded()
-            .IgnoreArgument_cbEncoded()
-            .IgnoreArgument_pvStructInfo()
-            .IgnoreArgument_pcbStructInfo();
-
-        STRICT_EXPECTED_CALL(CryptAcquireContextA(IGNORED_PTR_ARG, NULL, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) /*this is acquire a handle to a key container within a cryptographic service provider*/
-            .IgnoreArgument_phProv();
-
-        STRICT_EXPECTED_CALL(CryptImportKey((HCRYPTPROV)IGNORED_PTR_ARG, IGNORED_PTR_ARG, IGNORED_NUM_ARG, (HCRYPTKEY)NULL, 0, IGNORED_PTR_ARG)) /*tranferring the key from the blob to the cryptrographic key provider*/
-            .IgnoreArgument_hProv()
-            .IgnoreArgument_pbData()
-            .IgnoreArgument_dwDataLen()
-            .IgnoreArgument_phKey();
-
-        STRICT_EXPECTED_CALL(CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, IGNORED_PTR_ARG, IGNORED_NUM_ARG)) /*create a certificate context from an encoded certificate*/
-            .IgnoreArgument_cbCertEncoded()
-            .IgnoreArgument_pbCertEncoded();
-
-        STRICT_EXPECTED_CALL(CertSetCertificateContextProperty(IGNORED_PTR_ARG, CERT_KEY_PROV_HANDLE_PROP_ID, 0, IGNORED_PTR_ARG)) /*give the private key*/
-            .IgnoreArgument_pCertContext()
-            .IgnoreArgument_pvData();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
-
-        STRICT_EXPECTED_CALL(gballoc_free(IGNORED_PTR_ARG))
-            .IgnoreArgument_ptr();
+        setup_x509_schannel_create_mocks();
 
         umock_c_negative_tests_snapshot();
 
@@ -522,10 +543,11 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
             if (j == sizeof(calls_that_cannot_fail) / sizeof(calls_that_cannot_fail[0]))
             {
                 char temp_str[128];
-				X509_SCHANNEL_HANDLE h;
+                X509_SCHANNEL_HANDLE h;
 
                 umock_c_negative_tests_reset();
                 umock_c_negative_tests_fail_call(i);
+
                 ///act
                 (void)sprintf(temp_str, "On failed call %zu", i);
                 h = x509_schannel_create("certificate", "private key");
@@ -538,6 +560,27 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
         ///cleanup
         umock_c_negative_tests_deinit();
     }
+
+#if _MSC_VER > 1500
+    /* Codes_SRS_X509_SCHANNEL_07_001: [ x509_schannel_create shall determine whether the certificate is of type RSA or ECC. ] */
+    TEST_FUNCTION(x509_schannel_create_ecc_succeeds)
+    {
+        ///arrange
+        X509_SCHANNEL_HANDLE h;
+
+        setup_x509_schannel_create_ecc_mocks();
+
+        ///act
+        h = x509_schannel_create("certificate", "private key");
+
+        ///assert
+        ASSERT_IS_NOT_NULL(h);
+        ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
+
+        ///cleanup
+        x509_schannel_destroy(h);
+    }
+#endif
 
     /*Tests_SRS_X509_SCHANNEL_02_011: [ If parameter x509_schannel_handle is NULL then x509_schannel_destroy shall do nothing. ]*/
     TEST_FUNCTION(x509_schannel_destroy_with_NULL_handle_does_nothing)
@@ -596,7 +639,7 @@ BEGIN_TEST_SUITE(x509_schannel_unittests)
     TEST_FUNCTION(x509_schannel_get_certificate_context_succeeds)
     {
         ///arrange
-		PCCERT_CONTEXT p;
+        PCCERT_CONTEXT p;
         X509_SCHANNEL_HANDLE h = x509_schannel_create("certificate", "private key");
         umock_c_reset_all_calls();
 
