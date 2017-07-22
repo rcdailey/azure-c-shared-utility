@@ -4,14 +4,13 @@
 //This file pulls in OS-specific header files to allow compilation of socket_async.c under
 // most OS's except for Windows.
 
-// For lwIP systems
+// For lwIP systems that keep the standard lwIP include structure
 // Tested with:
-// ESP32
+// ESP8266
 
-#ifndef SOCKET_ASYNC_OS_H
-#define SOCKET_ASYNC_OS_H
+#ifndef LWIP_SNTP_OS_H
+#define LWIP_SNTP_OS_H
 
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
+#include "apps/sntp.h"
 
-#endif // SOCKET_ASYNC_OS_H
+#endif // LWIP_SNTP_OS_H
